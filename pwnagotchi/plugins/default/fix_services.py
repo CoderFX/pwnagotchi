@@ -3,7 +3,6 @@ import re
 import subprocess
 import time
 import random
-from io import TextIOWrapper
 import os
 
 import pwnagotchi
@@ -19,7 +18,7 @@ import pwnagotchi.ui.fonts as fonts
 
 class FixServices(plugins.Plugin):
     __author__ = 'jayofelony'
-    __version__ = '1.0.1'
+    __version__ = '1.0.2'
     __license__ = 'GPL3'
     __description__ = 'Fix blindness, firmware crashes and brain not being loaded. Auto-disables for external WiFi adapters.'
     __name__ = 'Fix_Services'
@@ -27,6 +26,8 @@ class FixServices(plugins.Plugin):
     Reload brcmfmac module when blindbug is detected, instead of rebooting. Adapted from WATCHDOG.
     Automatically disables itself when an external WiFi adapter is detected instead of the onboard brcmfmac chip.
     """
+
+    SUBPROCESS_TIMEOUT = 30
 
     def __init__(self):
         self.options = dict()
@@ -42,16 +43,29 @@ class FixServices(plugins.Plugin):
         self.LASTTRY = 0
         self.is_disabled = self._check_external_adapter()
 
-    def _check_external_adapter(self): 
+    def _run_cmd(self, cmd, timeout=None):
+        """Run a command safely with timeout, returning stdout or empty string on failure."""
+        if timeout is None:
+            timeout = self.SUBPROCESS_TIMEOUT
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return result.stdout
+        except subprocess.TimeoutExpired:
+            logging.error("[Fix_Services] Command timed out: %s" % repr(cmd))
+            return ''
+        except Exception as e:
+            logging.error("[Fix_Services] Command failed: %s: %s" % (repr(cmd), e))
+            return ''
+
+    def _check_external_adapter(self):
         """
         Check if an external WiFi adapter is being used instead of the onboard brcmfmac chip.
         Returns True if external adapter detected (plugin should be disabled), False otherwise.
         """
         try:
             # Check if wlan0 interface exists and get its driver
-            cmd_output = subprocess.check_output("ls /sys/class/net/", shell=True, text=True)
-            interfaces = cmd_output.strip().split('\n')
-            
+            interfaces = os.listdir('/sys/class/net/')
+
             # Look for wlan0 interface
             if 'wlan0' in interfaces:
                 try:
@@ -61,9 +75,9 @@ class FixServices(plugins.Plugin):
                     if os.path.exists(driver_path):
                         driver_link = os.readlink(driver_path)
                         driver_name = os.path.basename(driver_link)
-                        
+
                         logging.info(f"[Fix_Services] Detected WiFi driver: {driver_name}")
-                        
+
                         if driver_name != "brcmfmac":
                             logging.info(f"[Fix_Services] External WiFi adapter detected ({driver_name}). Plugin will be disabled.")
                             return True
@@ -71,14 +85,14 @@ class FixServices(plugins.Plugin):
                             logging.info("[Fix_Services] Onboard brcmfmac detected. Plugin will remain active.")
                             return False
                     else:
-                        lsmod_output = subprocess.check_output("lsmod | grep brcmfmac", shell=True, text=True)
-                        if lsmod_output.strip():
+                        lsmod_output = self._run_cmd(['lsmod'])
+                        if 'brcmfmac' in lsmod_output:
                             logging.info("[Fix_Services] brcmfmac module detected via lsmod. Plugin will remain active.")
                             return False
                         else:
                             logging.info("[Fix_Services] brcmfmac module not found. External adapter likely in use. Plugin will be disabled.")
                             return True
-                            
+
                 except subprocess.CalledProcessError:
                     logging.info("[Fix_Services] brcmfmac module not found. External adapter likely in use. Plugin will be disabled.")
                     return True
@@ -88,7 +102,7 @@ class FixServices(plugins.Plugin):
             else:
                 logging.warning("[Fix_Services] wlan0 interface not found. Plugin will be disabled.")
                 return True
-                
+
         except Exception as e:
             logging.error(f"[Fix_Services] Error detecting WiFi adapter: {e}. Plugin will be disabled.")
             return True
@@ -105,12 +119,10 @@ class FixServices(plugins.Plugin):
     def on_ready(self, agent):
         if self.is_disabled:
             return
-        last_lines = ''.join(list(TextIOWrapper(subprocess.Popen(['journalctl', '-n10', '-k'],
-                                                                 stdout=subprocess.PIPE).stdout))[-10:])
         try:
-            cmd_output = subprocess.check_output("ip link show wlan0mon", shell=True)
+            cmd_output = self._run_cmd(['ip', 'link', 'show', 'wlan0mon'])
             logging.debug("[Fix_Services ip link show wlan0mon]: %s" % repr(cmd_output))
-            if ",UP," in str(cmd_output):
+            if ",UP," in cmd_output:
                 logging.debug("wlan0mon is up.")
 
         except Exception as err:
@@ -159,13 +171,9 @@ class FixServices(plugins.Plugin):
     def on_epoch(self, agent, epoch, epoch_data):
         if self.is_disabled:
             return
-        last_lines = ''.join(list(TextIOWrapper(subprocess.Popen(['journalctl', '-n10', '-k'],
-                                                                 stdout=subprocess.PIPE).stdout))[-10:])
-        other_last_lines = ''.join(list(TextIOWrapper(subprocess.Popen(['journalctl', '-n10'],
-                                                                       stdout=subprocess.PIPE).stdout))[-10:])
-        other_other_last_lines = ''.join(
-            list(TextIOWrapper(subprocess.Popen(['tail', '-n10', '/etc/pwnagotchi/log/pwnagotchi.log'],
-                                                stdout=subprocess.PIPE).stdout))[-10:])
+        last_lines = self._run_cmd(['journalctl', '-n10', '-k'])
+        other_last_lines = self._run_cmd(['journalctl', '-n10'])
+        other_other_last_lines = self._run_cmd(['tail', '-n10', '/etc/pwnagotchi/log/pwnagotchi.log'])
         # don't check if we ran a reset recently
         logging.debug("[Fix_Services]**** epoch")
         if time.time() - self.LASTTRY > 180:
@@ -174,8 +182,8 @@ class FixServices(plugins.Plugin):
 
             logging.debug("[Fix_Services]**** checking")
             if len(self.pattern.findall(last_lines)) >= 1:
-                subprocess.check_output("monstop", shell=True)
-                subprocess.check_output("monstart", shell=True)
+                self._run_cmd(['monstop'])
+                self._run_cmd(['monstart'])
                 display.set('status', 'Wifi channel stuck. Restarting recon.')
                 display.update(force=True)
                 pwnagotchi.restart("AUTO")
@@ -211,7 +219,7 @@ class FixServices(plugins.Plugin):
                     display.update(force=True)
                 try:
                     # Run the monstart command to restart wlan0mon
-                    cmd_output = subprocess.check_output("monstart", shell=True)
+                    cmd_output = self._run_cmd(['monstart'])
                     logging.debug("[Fix_Services monstart]: %s" % repr(cmd_output))
                 except Exception as err:
                     logging.error("[Fix_Services monstart]: %s" % repr(err))
@@ -224,7 +232,7 @@ class FixServices(plugins.Plugin):
                     display.update(force=True)
                 try:
                     # Run the monstart command to restart wlan0mon
-                    cmd_output = subprocess.check_output("monstart", shell=True)
+                    cmd_output = self._run_cmd(['monstart'])
                     logging.debug("[Fix_Services monstart]: %s" % repr(cmd_output))
                 except Exception as err:
                     logging.error("[Fix_Services monstart]: %s" % repr(err))
@@ -235,7 +243,7 @@ class FixServices(plugins.Plugin):
                 if hasattr(agent, 'view'):
                     display.set('status', 'Restarting pwnagotchi!')
                     display.update(force=True)
-                os.system("systemctl restart bettercap")
+                subprocess.run(['systemctl', 'restart', 'bettercap'], timeout=self.SUBPROCESS_TIMEOUT)
                 pwnagotchi.restart("AUTO")
 
             # Look for pattern 6
@@ -244,7 +252,7 @@ class FixServices(plugins.Plugin):
                 if hasattr(agent, 'view'):
                     display.set('status', 'Restarting pwnagotchi!')
                     display.update(force=True)
-                os.system("systemctl restart bettercap")
+                subprocess.run(['systemctl', 'restart', 'bettercap'], timeout=self.SUBPROCESS_TIMEOUT)
                 pwnagotchi.restart("AUTO")
 
             # Look for pattern 7
@@ -317,9 +325,9 @@ class FixServices(plugins.Plugin):
             # attempt a sanity check. does wlan0mon exist?
             # is it up?
             try:
-                cmd_output = subprocess.check_output("ip link show wlan0mon", shell=True)
+                cmd_output = self._run_cmd(['ip', 'link', 'show', 'wlan0mon'])
                 logging.debug("[Fix_Services ip link show wlan0mon]: %s" % repr(cmd_output))
-                if ",UP," in str(cmd_output):
+                if ",UP," in cmd_output:
                     logging.debug("wlan0mon is up. Skip reset?")
                     # not reliable, so don't skip just yet
                     # print("wlan0mon is up. Skipping reset.")
@@ -344,7 +352,7 @@ class FixServices(plugins.Plugin):
             logging.debug("[Fix_Services] recon paused. Now trying wlan0mon reload")
 
             try:
-                cmd_output = subprocess.check_output("monstop", shell=True)
+                cmd_output = self._run_cmd(['monstop'])
                 self.logPrintView("info", "[Fix_Services] wlan0mon down and deleted: %s" % cmd_output,
                                   display, {"status": "wlan0mon d-d-d-down!", "face": faces.BORED})
             except Exception as nope:
@@ -361,20 +369,20 @@ class FixServices(plugins.Plugin):
             while tries < 3:
                 try:
                     # unload the module
-                    cmd_output = subprocess.check_output("sudo modprobe -r brcmfmac", shell=True)
+                    cmd_output = self._run_cmd(['sudo', 'modprobe', '-r', 'brcmfmac'])
                     self.logPrintView("info", "[Fix_Services] unloaded brcmfmac", display,
                                       {"status": "Turning it off #%s" % tries, "face": faces.SMART})
 
                     # reload the module
                     try:
                         # reload the brcmfmac kernel module
-                        cmd_output = subprocess.check_output("sudo modprobe brcmfmac", shell=True)
+                        cmd_output = self._run_cmd(['sudo', 'modprobe', 'brcmfmac'])
 
                         self.logPrintView("info", "[Fix_Services] reloaded brcmfmac")
 
                         # success! now make the mon0
                         try:
-                            cmd_output = subprocess.check_output("monstart", shell=True)
+                            cmd_output = self._run_cmd(['monstart'])
                             self.logPrintView("info", "[Fix_Services interface add wlan0mon worked #%s: %s"
                                               % (tries, cmd_output))
                             try:
