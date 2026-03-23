@@ -1,3 +1,4 @@
+import os
 from PIL import Image, ImageOps
 from textwrap import TextWrapper
 
@@ -62,19 +63,24 @@ class Text(Widget):
                     text = self.value
                 drawer.text(self.xy, text, font=self.font, fill=self.color)
             else:
-                self.image = Image.open(self.value)
-                self.image = self.image.convert('RGBA')
-                self.pixels = self.image.load()
-                for y in range(self.image.size[1]):
-                    for x in range(self.image.size[0]):
-                        if self.pixels[x,y][3] < 255:    # check alpha
-                            self.pixels[x,y] = (255, 255, 255, 255)
-                if self.color == 255:
-                    self._image = ImageOps.colorize(self.image.convert('L'), black = "white", white = "black")
-                else:
-                    self._image = self.image
-                self.image = self._image.convert('1')
-                canvas.paste(self.image, self.xy)
+                try:
+                    self.image = Image.open(self.value)
+                    self.image = self.image.convert('RGBA')
+                    self.pixels = self.image.load()
+                    for y in range(self.image.size[1]):
+                        for x in range(self.image.size[0]):
+                            if self.pixels[x,y][3] < 255:    # check alpha
+                                self.pixels[x,y] = (255, 255, 255, 255)
+                    if self.color == 255:
+                        self._image = ImageOps.colorize(self.image.convert('L'), black = "white", white = "black")
+                    else:
+                        self._image = self.image
+                    self.image = self._image.convert('1')
+                    canvas.paste(self.image, self.xy)
+                except Exception:
+                    # PNG load failed (value is a text face, not a file path) — render as text
+                    if isinstance(self.value, str) and not os.path.sep in self.value:
+                        drawer.text(self.xy, self.value, font=self.font, fill=self.color)
 
 
 class LabeledValue(Widget):

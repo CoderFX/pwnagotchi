@@ -14,19 +14,35 @@ from pwnagotchi.ui.web.server import Server
 from pwnagotchi.automata import Automata
 from pwnagotchi.log import LastSession
 from pwnagotchi.bettercap import Client
+from pwnagotchi.stub_client import StubClient
 from pwnagotchi.mesh.utils import AsyncAdvertiser
+from pwnagotchi.frame_padding import send_padded_deauth, send_padded_assoc
 
 RECOVERY_DATA_FILE = '/root/.pwnagotchi-recovery'
 
 
 class Agent(Client, Automata, AsyncAdvertiser):
     def __init__(self, view, config, keypair):
-        Client.__init__(self,
-                        "127.0.0.1" if "hostname" not in config['bettercap'] else config['bettercap']['hostname'],
-                        "http" if "scheme" not in config['bettercap'] else config['bettercap']['scheme'],
-                        8081 if "port" not in config['bettercap'] else config['bettercap']['port'],
-                        "pwnagotchi" if "username" not in config['bettercap'] else config['bettercap']['username'],
-                        "pwnagotchi" if "password" not in config['bettercap'] else config['bettercap']['password'])
+        self._ao_mode = config.get('bettercap', {}).get('disabled', False)
+
+        _bc = config['bettercap']
+        _host = _bc.get('hostname', '127.0.0.1')
+        _scheme = _bc.get('scheme', 'http')
+        _port = _bc.get('port', 8081)
+        _user = _bc.get('username', 'pwnagotchi')
+        _pass = _bc.get('password', 'pwnagotchi')
+
+        if self._ao_mode:
+            # Init StubClient and bind its methods so they override Client's MRO
+            self._stub = StubClient(_host, _scheme, _port, _user, _pass)
+            Client.__init__(self, _host, _scheme, _port, _user, _pass)
+            self.run = self._stub.run
+            self.session = self._stub.session
+            self.start_websocket = self._stub.start_websocket
+            self.set_stub_aps = self._stub.set_stub_aps
+            logging.info("[ao_mode] bettercap disabled — using StubClient")
+        else:
+            Client.__init__(self, _host, _scheme, _port, _user, _pass)
         Automata.__init__(self, config, view)
         AsyncAdvertiser.__init__(self, config, view, keypair)
 
@@ -127,12 +143,49 @@ class Agent(Client, Automata, AsyncAdvertiser):
                 logging.info("waiting for bettercap API to be available ...")
                 time.sleep(1)
 
+    def _start_monitor_mode_direct(self):
+        """Start monitor mode via subprocess (no bettercap needed)."""
+        mon_iface = self._config['main']['iface']
+        mon_start_cmd = self._config['main'].get('mon_start_cmd', '')
+
+        if os.path.exists('/sys/class/net/%s' % mon_iface):
+            logging.info("[ao_mode] monitor interface %s already exists", mon_iface)
+            self.start_advertising()
+            return
+
+        if mon_start_cmd:
+            logging.info("[ao_mode] starting monitor interface via: %s", mon_start_cmd)
+            try:
+                subprocess.run(mon_start_cmd, shell=True, timeout=15, check=False)
+            except subprocess.TimeoutExpired:
+                logging.error("[ao_mode] mon_start_cmd timed out")
+
+        # Poll for interface to appear
+        for i in range(15):
+            if os.path.exists('/sys/class/net/%s' % mon_iface):
+                logging.info("[ao_mode] monitor interface %s is up", mon_iface)
+                break
+            time.sleep(1)
+        else:
+            logging.error("[ao_mode] monitor interface %s did not appear after 15s", mon_iface)
+
+        logging.info("supported channels: %s", self._supported_channels)
+        logging.info("handshakes will be collected inside %s", self._config['bettercap']['handshakes'])
+        self.start_advertising()
+
     def start(self):
-        self._wait_bettercap()
-        self.setup_events()
+        if not self._ao_mode:
+            self._wait_bettercap()
+            self.setup_events()
         self.set_starting()
-        self.start_monitor_mode()
-        self.start_event_polling()
+        if self._ao_mode:
+            self._start_monitor_mode_direct()
+        else:
+            self.start_monitor_mode()
+        if not self._ao_mode:
+            self.start_event_polling()
+        else:
+            self._load_recovery_data()
         self.start_session_fetcher()
         # print initial stats
         self.next_epoch()
@@ -297,7 +350,8 @@ class Agent(Client, Automata, AsyncAdvertiser):
                 if delete:
                     logging.info("deleting %s", RECOVERY_DATA_FILE)
                     os.unlink(RECOVERY_DATA_FILE)
-        except Exception:  # FIX B4: was bare except, now catches Exception only
+        except Exception:
+            if not no_exceptions:
                 raise
 
     def start_session_fetcher(self):
@@ -431,7 +485,15 @@ class Agent(Client, Automata, AsyncAdvertiser):
             try:
                 logging.info("sending association frame to %s (%s %s) on channel %d [%d clients], %d dBm...",
                              ap['hostname'], ap['mac'], ap['vendor'], ap['channel'], len(ap['clients']), ap['rssi'])
-                self.run('wifi.assoc %s' % ap['mac'])
+                padded = False
+                if self._config['personality'].get('frame_padding', False):
+                    iface = self._config['main']['iface']
+                    min_size = self._config['personality'].get('frame_padding_min_bytes', 650)
+                    padded = send_padded_assoc(iface, ap['mac'], min_size=min_size)
+                    if padded:
+                        logging.debug("sent padded association frame to %s", ap['mac'])
+                if not padded:
+                    self.run('wifi.assoc %s' % ap['mac'])
                 self._epoch.track(assoc=True)
             except Exception as e:
                 self._on_error(ap['mac'], e)
@@ -456,7 +518,15 @@ class Agent(Client, Automata, AsyncAdvertiser):
                 logging.info("deauthing %s (%s) from %s (%s %s) on channel %d, %d dBm ...",
                              sta['mac'], sta['vendor'], ap['hostname'], ap['mac'], ap['vendor'], ap['channel'],
                              ap['rssi'])
-                self.run('wifi.deauth %s' % sta['mac'])
+                padded = False
+                if self._config['personality'].get('frame_padding', False):
+                    iface = self._config['main']['iface']
+                    min_size = self._config['personality'].get('frame_padding_min_bytes', 650)
+                    padded = send_padded_deauth(iface, ap['mac'], sta['mac'], min_size=min_size)
+                    if padded:
+                        logging.debug("sent padded deauth frame %s -> %s", ap['mac'], sta['mac'])
+                if not padded:
+                    self.run('wifi.deauth %s' % sta['mac'])
                 self._epoch.track(deauth=True)
             except Exception as e:
                 self._on_error(sta['mac'], e)

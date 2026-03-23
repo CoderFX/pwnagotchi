@@ -9,6 +9,8 @@ no_restart = false
 whitelist = [
     "EXAMPLE_NETWORK",
     "ANOTHER_EXAMPLE_NETWORK",
+    "Alpha",
+    "Alpha 5G",
     "fo:od:ba:be:fo:od",
     "fo:od:ba"
 ]
@@ -22,6 +24,30 @@ custom_plugin_repos = [
     "https://github.com/cyberartemio/wardriver-pwnagotchi-plugin/archive/main.zip"
 ]
 custom_plugins = "/etc/pwnagotchi/custom-plugins/"
+
+[main.plugins.angryoxide]
+enabled = false
+binary_path = "/usr/local/bin/angryoxide"
+interface = "wlan0mon"
+nexmon_mode = true              # enable injection throttling for brcmfmac/nexmon chips
+injection_delay_ms = 500        # ms between injected frames (~2 fps, tune based on chip stability)
+channel_dwell_ms = 5000         # ms to dwell per channel (nexmon needs longer than default 100ms)
+output_dir = "/etc/pwnagotchi/handshakes/"
+notx = false                    # passive-only mode (no injection, capture only)
+extra_args = ""                 # additional angryoxide CLI arguments
+max_crashes = 10                # stop retrying after this many crashes
+adaptive_throttle = false       # auto-tune injection_delay_ms based on stability
+delay_min = 100                 # minimum injection delay for adaptive throttle (ms)
+delay_max = 2000                # maximum injection delay for adaptive throttle (ms)
+
+[main.plugins.walkby]
+enabled = false
+min_rssi = -75                  # ignore APs weaker than this (too far to capture while walking)
+deauth_per_client = 3           # burst deauth frames per client
+assoc_per_ap = 2                # PMKID association attempts per new AP
+cooldown = 30                   # seconds before re-attacking same AP
+show_status = true              # show BLITZ status on display
+status_position = [0, 82]       # [x, y] position for status text
 
 [main.plugins.auto-tune]
 enabled = true
@@ -175,6 +201,8 @@ sad_num_epochs = 25
 bond_encounters_factor = 20000
 throttle_a = 0.4
 throttle_d = 0.9
+frame_padding = false             # pad injection frames to avoid BCM43436B0 PSM watchdog crashes
+frame_padding_min_bytes = 650     # minimum frame size in bytes (650+ avoids PSM timing issues)
 
 [ui]
 invert = false # false = black background, true = white background
